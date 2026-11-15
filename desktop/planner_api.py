@@ -324,15 +324,31 @@ class PlannerApi:
             return {"ok": False, "error": f"Could not read the library: {e}"}
 
     def save_blueprint_input(self, text: str) -> dict:
-        """Put a blueprint string where the exporter will decode it on the next map load (blueprints\\in\\planner.txt)."""
+        """Hand a blueprint string to the running exporter (blueprints\\in\\planner.txt); it answers in blueprints\\out\\planner.json."""
         text = (text or "").strip()
         if not text.startswith("B") or ":" not in text[:12] or len(text) > 5_000_000:
-            return {"ok": False, "error": "That does not look like a blueprint string (it starts with B1234:)."}
-        d = self._exports.parent / "blueprints" / "in"
-        d.mkdir(parents=True, exist_ok=True)
-        f = d / "planner.txt"
+            return {"ok": False, "error": "That does not look like a blueprint code (it starts with B1234:)."}
+        base = self._exports.parent / "blueprints"
+        (base / "in").mkdir(parents=True, exist_ok=True)
+        (base / "out").mkdir(parents=True, exist_ok=True)
+        old = base / "out" / "planner.json"
+        try:
+            old.unlink(missing_ok=True)
+        except OSError:
+            pass
+        f = base / "in" / "planner.txt"
         f.write_text(text, encoding="utf-8")
         return {"ok": True, "path": str(f)}
+
+    def read_blueprint_decoded(self) -> dict:
+        """What the running exporter made of the last code (blueprints\\out\\planner.json); not ready until the game has answered."""
+        f = self._exports.parent / "blueprints" / "out" / "planner.json"
+        if not f.is_file():
+            return {"ok": True, "ready": False}
+        try:
+            return {"ok": True, "ready": True, "text": f.read_text(encoding="utf-8")}
+        except OSError as e:
+            return {"ok": False, "error": f"Could not read the answer: {e}"}
 
     def read_latest_export(self) -> dict:
         """The text of the newest export, for the planner to import (refuses anything over 200 MB)."""

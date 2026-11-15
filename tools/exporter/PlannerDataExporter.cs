@@ -21,7 +21,7 @@ using Mafi.Core.Mods;
 using Mafi.Core.Prototypes;
 
 public sealed class PlannerDataExporter : DataOnlyMod, IMod {
-    const string Version = "0.3.3";
+    const string Version = "0.4.0";
     // Hard limits so a bad object graph can never hang game start-up: per prototype and for the whole export.
     const int MaxDepth = 6, MaxItems = 3000;
     static int NodeLimit = 12000;
@@ -339,6 +339,64 @@ public sealed class PlannerDataExporter : DataOnlyMod, IMod {
             if (m.Name == name && m.GetParameters().Length == argCount && !m.IsGenericMethodDefinition) return m.Invoke(m.IsStatic ? null : target, args);
         throw new MissingMethodException(type.Name + "." + name + "/" + argCount);
     }
+    Dictionary<string, object> DecodeFile(object lib, Type libType, object ctx, string file) {
+        var t = Obj("file", Path.GetFileName(file));
+        try {
+            var text = File.ReadAllText(file).Trim();
+            MethodInfo pm = null;
+            var sigs = new List<object>(); t["parseMethods"] = sigs;
+            foreach (var m in libType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
+                if (m.Name.IndexOf("Parse", StringComparison.OrdinalIgnoreCase) >= 0 || m.Name.IndexOf("FromString", StringComparison.OrdinalIgnoreCase) >= 0) { sigs.Add(Sig(m)); if (m.Name == "TryParseFromString" && pm == null) pm = m; }
+            if (pm == null) throw new MissingMethodException("TryParseFromString");
+            var pars = pm.GetParameters(); var args = new object[pars.Length]; int strAt = -1;
+            for (int i = 0; i < pars.Length; i++) {
+                var pt = pars[i].ParameterType; if (pt.IsByRef) pt = pt.GetElementType();
+                if (pars[i].IsOut || pars[i].ParameterType.IsByRef) args[i] = pt.IsValueType ? Activator.CreateInstance(pt) : null;
+                else if (pt == typeof(string) && strAt < 0) { args[i] = text; strAt = i; }
+                else if (ctx != null && pt.IsInstanceOfType(ctx)) args[i] = ctx;
+                else if (pt == typeof(bool)) args[i] = false;
+            }
+            var ok = pm.Invoke(pm.IsStatic ? null : lib, args);
+            t["parsed"] = ok;
+            object parsed = null;
+            for (int i = 0; i < pars.Length; i++) if (pars[i].ParameterType.IsByRef) { var o = args[i]; if (o is string) t["error"] = o; else if (o != null && parsed == null) parsed = o; }
+            if (parsed == null && ok != null && !(ok is bool)) parsed = ok;
+            if ((ok is bool ? (bool)ok : true) && parsed != null) {
+                var bp = Member(parsed, "Value") != null && parsed.GetType().Name.StartsWith("Option") ? Member(parsed, "Value") : parsed;
+                t["name"] = Member(bp, "Name"); t["gameVersion"] = Member(bp, "GameVersion");
+                try { t["entities"] = Compact(bp); } catch (Exception e) { t["dumpError"] = e.Message; }
+                try { var back = Convert.ToString(Call(lib, libType, "ConvertToString", 2, new object[] { bp, false })); t["roundTripEqual"] = back == text; t["roundTripLength"] = back.Length; t["inputLength"] = text.Length; if (back != text) t["roundTripString"] = back; } catch (Exception e) { t["roundTripError"] = e.InnerException != null ? e.InnerException.Message : e.Message; }
+            }
+        } catch (Exception e) { t["exception"] = e.InnerException != null ? e.InnerException.ToString() : e.ToString(); }
+        return t;
+    }
+    static string Safe(string name) { var sb = new StringBuilder(); foreach (var ch in name) sb.Append(char.IsLetterOrDigit(ch) || ch == '-' || ch == '_' ? ch : '_'); return sb.ToString(); }
+    // keeps decoding every text file that appears in blueprints\in while the game runs, writing blueprints\out\<name>.json
+    void WatchBlueprints(object lib, Type libType, object ctx) {
+        string inDir = Path.Combine(Manifest.RootDirectoryPath, "blueprints", "in"), outDir = Path.Combine(Manifest.RootDirectoryPath, "blueprints", "out");
+        var seen = new Dictionary<string, string>();
+        while (true) {
+            try {
+                if (Directory.Exists(inDir)) {
+                    Directory.CreateDirectory(outDir);
+                    foreach (var file in Directory.GetFiles(inDir, "*.txt")) {
+                        var fi = new FileInfo(file); var stamp = fi.LastWriteTimeUtc.Ticks + ":" + fi.Length;
+                        string old; if (seen.TryGetValue(file, out old) && old == stamp) continue;
+                        seen[file] = stamp;
+                        System.Threading.Thread.Sleep(200);   // let the writer finish
+                        var t = DecodeFile(lib, libType, ctx, file); t.Remove("parseMethods");
+                        var tmp = Path.Combine(outDir, Safe(Path.GetFileNameWithoutExtension(file)) + ".tmp");
+                        File.WriteAllText(tmp, Json(t), new UTF8Encoding(false));
+                        var dest = Path.Combine(outDir, Safe(Path.GetFileNameWithoutExtension(file)) + ".json");
+                        if (File.Exists(dest)) File.Delete(dest);
+                        File.Move(tmp, dest);
+                    }
+                }
+            } catch (Exception e) { Log.Error("PlannerDataExporter (watch): " + e.Message); }
+            System.Threading.Thread.Sleep(1000);
+        }
+    }
+    object watchLib, watchCtx; Type watchType;
     void BlueprintProbe() {
         var probe = Obj("exporter", "PlannerDataExporter " + Version);
         var steps = new List<object>(); probe["steps"] = steps;
@@ -376,41 +434,12 @@ public sealed class PlannerDataExporter : DataOnlyMod, IMod {
             // decode test strings with the game's own parser
             var tests = new List<object>(); probe["parseTests"] = tests;
             var inDir = Path.Combine(Manifest.RootDirectoryPath, "blueprints", "in");
-            if (Directory.Exists(inDir) && libType != null) {
-                foreach (var file in Directory.GetFiles(inDir, "*.txt")) {
-                    var t = Obj("file", Path.GetFileName(file));
-                    tests.Add(t);
-                    try {
-                        var text = File.ReadAllText(file).Trim();
-                        MethodInfo pm = null;
-                        var sigs = new List<object>(); t["parseMethods"] = sigs;
-                        foreach (var m in libType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
-                            if (m.Name.IndexOf("Parse", StringComparison.OrdinalIgnoreCase) >= 0 || m.Name.IndexOf("FromString", StringComparison.OrdinalIgnoreCase) >= 0) { sigs.Add(Sig(m)); if (m.Name == "TryParseFromString" && pm == null) pm = m; }
-                        if (pm == null) throw new MissingMethodException("TryParseFromString");
-                        var pars = pm.GetParameters(); var args = new object[pars.Length]; int strAt = -1;
-                        for (int i = 0; i < pars.Length; i++) {
-                            var pt = pars[i].ParameterType; if (pt.IsByRef) pt = pt.GetElementType();
-                            if (pars[i].IsOut || pars[i].ParameterType.IsByRef) args[i] = pt.IsValueType ? Activator.CreateInstance(pt) : null;
-                            else if (pt == typeof(string) && strAt < 0) { args[i] = text; strAt = i; }
-                            else if (ctx != null && pt.IsInstanceOfType(ctx)) args[i] = ctx;
-                            else if (pt == typeof(bool)) args[i] = false;
-                        }
-                        var ok = pm.Invoke(pm.IsStatic ? null : lib, args);
-                        t["parsed"] = ok;
-                        object parsed = null;
-                        for (int i = 0; i < pars.Length; i++) if (pars[i].ParameterType.IsByRef) { var o = args[i]; if (o is string) t["error"] = o; else if (o != null && parsed == null) parsed = o; }
-                        if (parsed == null && ok != null && !(ok is bool)) parsed = ok;
-                        if ((ok is bool ? (bool)ok : true) && parsed != null) {
-                            var bp = Member(parsed, "Value") != null && parsed.GetType().Name.StartsWith("Option") ? Member(parsed, "Value") : parsed;
-                            t["name"] = Member(bp, "Name"); t["gameVersion"] = Member(bp, "GameVersion");
-                            try { t["entities"] = Compact(bp); } catch (Exception e) { t["dumpError"] = e.Message; }
-                            try { var back = Convert.ToString(Call(lib, libType, "ConvertToString", 2, new object[] { bp, false })); t["roundTripEqual"] = back == text; t["roundTripLength"] = back.Length; t["inputLength"] = text.Length; if (back != text) t["roundTripString"] = back; } catch (Exception e) { t["roundTripError"] = e.InnerException != null ? e.InnerException.Message : e.Message; }
-                        }
-                    } catch (Exception e) { t["exception"] = e.InnerException != null ? e.InnerException.ToString() : e.ToString(); }
-                }
-            }
+            if (Directory.Exists(inDir) && libType != null)
+                foreach (var file in Directory.GetFiles(inDir, "*.txt")) tests.Add(DecodeFile(lib, libType, ctx, file));
+            watchLib = lib; watchType = libType; watchCtx = ctx;
         } catch (Exception e) { probe["exception"] = e.ToString(); }
         try { File.WriteAllText(Path.Combine(Manifest.RootDirectoryPath, "exports", "blueprint-probe.json"), Json(probe), new UTF8Encoding(false)); Log.Info("PlannerDataExporter: wrote blueprint-probe.json"); } catch { }
+        if (watchLib != null) WatchBlueprints(watchLib, watchType, watchCtx);
     }
 
     // ---- minimal JSON writer ----------------------------------------------------------------------

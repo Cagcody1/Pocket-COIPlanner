@@ -10,7 +10,7 @@ const tcolor = (p: string) => (/pipe/i.test(p) ? COLORS.Pipe : /loose/i.test(p) 
 
 /** Your game's blueprint library, as read by the exporter: browse, search, see what is in each and draw it on a tile grid. */
 export function mountBlueprints(el: HTMLElement, getData: () => GameData) {
-  let native: NativeApi | null = null, list: Bp[] | null = null, msg = "", q = "", sel = -1;
+  let native: NativeApi | null = null, list: Bp[] | null = null, msg = "", q = "", sel = -1, pasted: Bp | null = null, code = "", waiting = false;
 
   const load = async () => {
     native ??= await whenNative();
@@ -20,6 +20,35 @@ export function mountBlueprints(el: HTMLElement, getData: () => GameData) {
     if (!r.ok) { msg = `<div class="box bad">${esc(r.error)}</div>`; return render(); }
     try { list = (JSON.parse(String(r.text)).blueprints ?? []) as Bp[]; msg = ""; } catch (e) { msg = `<div class="box bad">Could not read the library file: ${esc(String(e))}</div>`; }
     render();
+  };
+
+  const open = async () => {
+    native ??= await whenNative();
+    if (!native) { msg = `<div class="box">This needs the desktop app.</div>`; return render(); }
+    const r = await native.save_blueprint_input(code);
+    if (!r.ok) { msg = `<div class="box bad">${esc(r.error)}</div>`; return render(); }
+    waiting = true; pasted = null; msg = `<div class="box">Waiting for the game to read it… (the game must be running with the exporter on and a map loaded)</div>`; render();
+    for (let i = 0; i < 90 && waiting; i++) {
+      await new Promise((ok) => setTimeout(ok, 1000));
+      const a = await native.read_blueprint_decoded();
+      if (!a.ok) { msg = `<div class="box bad">${esc(a.error)}</div>`; break; }
+      if (!a.ready) continue;
+      try {
+        const t = JSON.parse(String(a.text)) as Bp & { parsed?: boolean; error?: string; exception?: string; roundTripEqual?: boolean };
+        if (t.parsed === false || t.exception) { msg = `<div class="box bad">The game could not read that code: ${esc(t.error || t.exception || "unknown")}</div>`; }
+        else { t.string = code.trim(); t.folder = "pasted"; pasted = t; sel = -2; msg = t.roundTripEqual === false ? `<div class="box warn">Read OK, but writing it back changes the code. Tell me before you rely on it.</div>` : ""; }
+      } catch (e) { msg = `<div class="box bad">Could not read the answer: ${esc(String(e))}</div>`; }
+      waiting = false; return render();
+    }
+    if (waiting) { waiting = false; msg = `<div class="box bad">No answer after 90 seconds. Is the game running with Planner Data Exporter enabled and a map loaded? (It needs the exporter 0.4.0 or newer; use Rebuild and update exporter.)</div>`; }
+    render();
+  };
+  const pasteBox = () => `<div class="box"><b>Paste a blueprint code</b> <span class="hint">(copy it in the game with the blueprint's Copy button)</span>
+    <textarea id="bpCode" placeholder="B1564:H4sIAAAA…" style="width:100%;height:4.5rem;font:12px ui-monospace,monospace">${esc(code)}</textarea>
+    <p><button class="btn" id="bpOpen" ${waiting ? "disabled" : ""}>Open it here</button></p></div>`;
+  const wirePaste = () => {
+    const ta = el.querySelector<HTMLTextAreaElement>("#bpCode"); if (ta) ta.oninput = () => (code = ta.value);
+    const b = el.querySelector<HTMLButtonElement>("#bpOpen"); if (b) b.onclick = () => void open();
   };
 
   function draw(bp: Bp, data: GameData) {
@@ -57,18 +86,21 @@ export function mountBlueprints(el: HTMLElement, getData: () => GameData) {
   }
 
   function render() {
-    if (!list) { el.innerHTML = `<div class="box"><p>Your own blueprints, read from the game by the exporter (after a map is loaded).</p><p><button class="btn" id="bpLoad">Load my blueprint library</button></p></div>${msg}`; el.querySelector<HTMLButtonElement>("#bpLoad")!.onclick = () => void load(); return; }
+    if (!list) { el.innerHTML = `${pasteBox()}${msg}${pasted ? detail(pasted, getData()) : ""}<div class="box"><p>Or browse your whole blueprint library (read by the exporter once a map is loaded).</p><p><button class="btn" id="bpLoad">Load my blueprint library</button></p></div>`; wirePaste(); el.querySelector<HTMLButtonElement>("#bpLoad")!.onclick = () => void load(); wireCopy(); return; }
     const needle = q.trim().toLowerCase();
     const shown = list.map((b, i) => ({ b, i })).filter(({ b }) => !needle || `${b.name} ${b.folder} ${(b.entities ?? []).map((e) => e.proto).join(" ")}`.toLowerCase().includes(needle)).slice(0, 300);
-    el.innerHTML = `${msg}<div class="row"><input id="bpQ" type="search" placeholder="Search name, folder or part (e.g. Distiller)…" value="${esc(q)}" style="width:22rem"> <span class="hint">${list.length} blueprints${shown.length < list.length ? `, showing ${shown.length}` : ""}</span> <button class="btn" id="bpLoad">Reload</button></div>
+    el.innerHTML = `${pasteBox()}${msg}<div class="row"><input id="bpQ" type="search" placeholder="Search name, folder or part (e.g. Distiller)…" value="${esc(q)}" style="width:22rem"> <span class="hint">${list.length} blueprints${shown.length < list.length ? `, showing ${shown.length}` : ""}</span> <button class="btn" id="bpLoad">Reload</button></div>
       <div style="display:grid;grid-template-columns:minmax(14rem,22rem) 1fr;gap:1rem;align-items:start"><div style="max-height:75vh;overflow:auto">${shown.map(({ b, i }) => `<div><button class="btn" data-i="${i}" style="width:100%;text-align:left;${i === sel ? "outline:2px solid var(--accent)" : ""}">${esc(b.name)}<br><small>${esc(b.folder || "/")} · ${b.itemCount ?? b.entities?.length ?? "?"} parts</small></button></div>`).join("")}</div>
-      <div>${sel >= 0 && list[sel] ? detail(list[sel], getData()) : `<p class="hint">Pick a blueprint on the left.</p>`}</div></div>`;
+      <div>${sel === -2 && pasted ? detail(pasted, getData()) : sel >= 0 && list[sel] ? detail(list[sel], getData()) : `<p class="hint">Pick a blueprint on the left.</p>`}</div></div>`;
     const inp = el.querySelector<HTMLInputElement>("#bpQ")!;
     inp.oninput = () => { q = inp.value; const pos = inp.selectionStart; render(); const n = el.querySelector<HTMLInputElement>("#bpQ")!; n.focus(); n.setSelectionRange(pos, pos); };
     el.querySelector<HTMLButtonElement>("#bpLoad")!.onclick = () => void load();
     el.querySelectorAll<HTMLButtonElement>("[data-i]").forEach((b) => (b.onclick = () => { sel = Number(b.dataset.i); render(); }));
+    wirePaste(); wireCopy();
+  }
+  function wireCopy() {
     const cp = el.querySelector<HTMLButtonElement>("#bpCopy");
-    if (cp) cp.onclick = async () => { const s = list![sel].string; if (!s) { msg = `<div class="box bad">The exporter did not write a string for this blueprint.</div>`; return render(); } try { await navigator.clipboard.writeText(s); cp.textContent = "Copied"; } catch { msg = `<div class="box"><textarea readonly style="width:100%;height:6rem">${esc(s)}</textarea></div>`; render(); } };
+    if (cp) cp.onclick = async () => { const s = (sel === -2 ? pasted : list?.[sel])?.string; if (!s) { msg = `<div class="box bad">The exporter did not write a string for this blueprint.</div>`; return render(); } try { await navigator.clipboard.writeText(s); cp.textContent = "Copied"; } catch { msg = `<div class="box"><textarea readonly style="width:100%;height:6rem">${esc(s)}</textarea></div>`; render(); } };
   }
   return render;
 }
