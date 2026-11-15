@@ -11,6 +11,7 @@ const tcolor = (p: string) => (/pipe/i.test(p) ? COLORS.Pipe : /loose/i.test(p) 
 /** Your game's blueprint library, as read by the exporter: browse, search, see what is in each and draw it on a tile grid. */
 export function mountBlueprints(el: HTMLElement, getData: () => GameData) {
   let native: NativeApi | null = null, list: Bp[] | null = null, msg = "", q = "", sel = -1, pasted: Bp | null = null, code = "", waiting = false, zoom = 0, labels = true;
+  const openDirs = new Set<string>();
 
   const load = async () => {
     native ??= await whenNative();
@@ -96,14 +97,36 @@ export function mountBlueprints(el: HTMLElement, getData: () => GameData) {
   function render() {
     if (!list) { el.innerHTML = `${pasteBox()}${msg}${pasted ? detail(pasted, getData()) : ""}<div class="box"><p>Or browse your whole blueprint library (read by the exporter once a map is loaded).</p><p><button class="btn" id="bpLoad">Load my blueprint library</button></p></div>`; wirePaste(); el.querySelector<HTMLButtonElement>("#bpLoad")!.onclick = () => void load(); wireCopy(); return; }
     const needle = q.trim().toLowerCase();
-    const shown = list.map((b, i) => ({ b, i })).filter(({ b }) => !needle || `${b.name} ${b.folder} ${(b.entities ?? []).map((e) => e.proto).join(" ")}`.toLowerCase().includes(needle)).slice(0, 300);
-    el.innerHTML = `${pasteBox()}${msg}<div class="row"><input id="bpQ" type="search" placeholder="Search name, folder or part (e.g. Distiller)…" value="${esc(q)}" style="width:22rem"> <span class="hint">${list.length} blueprints${shown.length < list.length ? `, showing ${shown.length}` : ""}</span> <button class="btn" id="bpLoad">Reload</button></div>
-      <div style="display:grid;grid-template-columns:minmax(14rem,22rem) 1fr;gap:1rem;align-items:start"><div style="max-height:75vh;overflow:auto">${shown.map(({ b, i }) => `<div><button class="btn" data-i="${i}" style="width:100%;text-align:left;${i === sel ? "outline:2px solid var(--accent)" : ""}">${esc(b.name)}<br><small>${esc(b.folder || "/")} · ${b.itemCount ?? b.entities?.length ?? "?"} parts</small></button></div>`).join("")}</div>
+    const hit = (b: Bp) => !needle || `${b.name} ${b.folder} ${(b.entities ?? []).map((e) => e.proto).join(" ")}`.toLowerCase().includes(needle);
+    // folder tree in the game's own order: folder path "/A/B" -> nested nodes
+    interface Node { name: string; path: string; kids: Map<string, Node>; items: { b: Bp; i: number }[] }
+    const root: Node = { name: "", path: "", kids: new Map(), items: [] };
+    let shownCount = 0;
+    list.forEach((b, i) => {
+      if (!hit(b)) return;
+      shownCount++;
+      let n = root;
+      for (const part of (b.folder || "").split("/").filter(Boolean)) {
+        const path = n.path + "/" + part;
+        if (!n.kids.has(part)) n.kids.set(part, { name: part, path, kids: new Map(), items: [] });
+        n = n.kids.get(part)!;
+      }
+      n.items.push({ b, i });
+    });
+    const count = (n: Node): number => n.items.length + [...n.kids.values()].reduce((t, k) => t + count(k), 0);
+    const item = ({ b, i }: { b: Bp; i: number }) => `<div><button class="btn" data-i="${i}" style="width:100%;text-align:left;${i === sel ? "outline:2px solid var(--accent)" : ""}">${esc(b.name)} <small>· ${b.itemCount ?? b.entities?.length ?? "?"} parts</small></button></div>`;
+    const tree = (n: Node, depth: number): string => [...n.kids.values()].map((k) =>
+      `<details data-dir="${esc(k.path)}" ${needle || openDirs.has(k.path) ? "open" : ""} style="margin-left:${depth ? 0.8 : 0}rem"><summary style="cursor:pointer"><b>${esc(k.name)}</b> <small>(${count(k)})</small></summary>${tree(k, depth + 1)}</details>`).join("")
+      + n.items.map(item).join("");
+    const listHtml = tree(root, 0);
+    el.innerHTML = `${pasteBox()}${msg}<div class="row"><input id="bpQ" type="search" placeholder="Search name, folder or part (e.g. Distiller)…" value="${esc(q)}" style="width:22rem"> <span class="hint">${list.length} blueprints${shownCount < list.length ? `, ${shownCount} match` : ""}</span> <button class="btn" id="bpLoad">Reload</button></div>
+      <div style="display:grid;grid-template-columns:minmax(14rem,22rem) 1fr;gap:1rem;align-items:start"><div style="max-height:75vh;overflow:auto">${listHtml}</div>
       <div>${sel === -2 && pasted ? detail(pasted, getData()) : sel >= 0 && list[sel] ? detail(list[sel], getData()) : `<p class="hint">Pick a blueprint on the left.</p>`}</div></div>`;
     const inp = el.querySelector<HTMLInputElement>("#bpQ")!;
     inp.oninput = () => { q = inp.value; const pos = inp.selectionStart; render(); const n = el.querySelector<HTMLInputElement>("#bpQ")!; n.focus(); n.setSelectionRange(pos, pos); };
     el.querySelector<HTMLButtonElement>("#bpLoad")!.onclick = () => void load();
     el.querySelectorAll<HTMLButtonElement>("[data-i]").forEach((b) => (b.onclick = () => { sel = Number(b.dataset.i); render(); }));
+    el.querySelectorAll<HTMLDetailsElement>("details[data-dir]").forEach((d) => (d.ontoggle = () => { const k = d.dataset.dir!; if (d.open) openDirs.add(k); else openDirs.delete(k); }));
     wirePaste(); wireCopy();
   }
   function wireCopy() {
