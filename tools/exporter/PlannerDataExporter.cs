@@ -21,7 +21,7 @@ using Mafi.Core.Mods;
 using Mafi.Core.Prototypes;
 
 public sealed class PlannerDataExporter : DataOnlyMod, IMod {
-    const string Version = "0.4.0";
+    const string Version = "0.4.1";
     // Hard limits so a bad object graph can never hang game start-up: per prototype and for the whole export.
     const int MaxDepth = 6, MaxItems = 3000;
     static int NodeLimit = 12000;
@@ -396,6 +396,22 @@ public sealed class PlannerDataExporter : DataOnlyMod, IMod {
             System.Threading.Thread.Sleep(1000);
         }
     }
+    // how the game builds and changes blueprint parts: constructors, static factories, writable members
+    static object EditApiOf(Type t) {
+        var ctors = new List<object>(); var methods = new List<object>(); var members = new List<object>();
+        try { foreach (var c in t.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)) ctors.Add(Sig(c)); } catch { }
+        try {
+            foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+                if (!m.IsSpecialName) methods.Add(Sig(m));
+        } catch { }
+        try {
+            foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                members.Add(Obj("field", f.Name, "type", TypeName(f.FieldType), "public", f.IsPublic, "readonly", f.IsInitOnly));
+            foreach (var pr in t.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                members.Add(Obj("property", pr.Name, "type", TypeName(pr.PropertyType), "canWrite", pr.CanWrite && pr.GetSetMethod(true) != null, "publicSet", pr.GetSetMethod(false) != null));
+        } catch { }
+        return Obj("type", TypeName(t), "base", t.BaseType == null ? null : TypeName(t.BaseType), "isValueType", t.IsValueType, "constructors", ctors, "methods", methods, "members", members);
+    }
     object watchLib, watchCtx; Type watchType;
     void BlueprintProbe() {
         var probe = Obj("exporter", "PlannerDataExporter " + Version);
@@ -431,6 +447,16 @@ public sealed class PlannerDataExporter : DataOnlyMod, IMod {
                 File.WriteAllText(Path.Combine(folder, "blueprint-library.json"), Json(Obj("exporter", "PlannerDataExporter " + Version, "count", list.Count, "blueprints", list)), new UTF8Encoding(false));
                 probe["libraryBlueprints"] = list.Count;
             }
+            try {
+                var api = new List<object>(); var names = new List<string> { "Mafi.Core.Entities.EntityConfigData", "Mafi.Core.TileTransform", "Mafi.Core.Factory.Transports.TransportTrajectory", "Mafi.Core.Entities.Blueprints.BlueprintsLibrary" };
+                foreach (var n in names) { var ty = FindType(n); if (ty != null) api.Add(EditApiOf(ty)); }
+                if (lib != null) {
+                    foreach (var bp in Seq(Member(Member(lib, "Root"), "Blueprints"))) { api.Add(EditApiOf(bp.GetType())); var first = Seq(Member(bp, "Items")).FirstOrDefault(); if (first != null && first.GetType().FullName != "Mafi.Core.Entities.EntityConfigData") api.Add(EditApiOf(first.GetType())); break; }
+                    foreach (var iface in libType.GetInterfaces()) { }
+                }
+                var iw = FindType("Mafi.Core.Entities.Blueprints.IBlueprintItem"); if (iw != null) api.Add(EditApiOf(iw));
+                File.WriteAllText(Path.Combine(folder, "blueprint-edit-api.json"), Json(Obj("exporter", "PlannerDataExporter " + Version, "types", api)), new UTF8Encoding(false));
+            } catch (Exception e) { steps.Add(Obj("editApiError", e.Message)); }
             // decode test strings with the game's own parser
             var tests = new List<object>(); probe["parseTests"] = tests;
             var inDir = Path.Combine(Manifest.RootDirectoryPath, "blueprints", "in");

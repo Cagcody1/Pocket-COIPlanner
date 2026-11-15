@@ -302,6 +302,15 @@ class PlannerApi:
             return {"ok": False, "error": "The file is over 3 MB; attach it instead.", "path": str(f)}
         return {"ok": True, "text": f.read_text(encoding="utf-8"), "path": str(f), "bytes": f.stat().st_size}
 
+    def read_blueprint_edit_api(self) -> dict:
+        """How the game builds and changes blueprint parts (blueprint-edit-api.json), to copy into a message."""
+        f = self._exports / "blueprint-edit-api.json"
+        if not f.is_file():
+            return {"ok": False, "error": "Not written yet. Rebuild the exporter (0.4.1 or newer), start the game with it enabled and load a map."}
+        if f.stat().st_size > 3_000_000:
+            return {"ok": False, "error": "The file is over 3 MB; attach it instead.", "path": str(f)}
+        return {"ok": True, "text": f.read_text(encoding="utf-8"), "path": str(f), "bytes": f.stat().st_size}
+
     def read_blueprint_probe(self) -> dict:
         """What the exporter learned about the game's blueprint library (blueprint-probe.json), to copy into a message."""
         f = self._exports / "blueprint-probe.json"
