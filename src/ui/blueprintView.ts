@@ -10,7 +10,7 @@ const tcolor = (p: string) => (/pipe/i.test(p) ? COLORS.Pipe : /loose/i.test(p) 
 
 /** Your game's blueprint library, as read by the exporter: browse, search, see what is in each and draw it on a tile grid. */
 export function mountBlueprints(el: HTMLElement, getData: () => GameData) {
-  let native: NativeApi | null = null, list: Bp[] | null = null, msg = "", q = "", sel = -1, pasted: Bp | null = null, code = "", waiting = false;
+  let native: NativeApi | null = null, list: Bp[] | null = null, msg = "", q = "", sel = -1, pasted: Bp | null = null, code = "", waiting = false, zoom = 0, labels = true;
 
   const load = async () => {
     native ??= await whenNative();
@@ -65,14 +65,22 @@ export function mountBlueprints(el: HTMLElement, getData: () => GameData) {
     const xs = [...rects.flatMap((r) => [r.x0, r.x1]), ...lines.flatMap((l) => l.pts.map((p) => p[0]))], ys = [...rects.flatMap((r) => [r.y0, r.y1]), ...lines.flatMap((l) => l.pts.map((p) => p[1]))];
     if (!xs.length) return "";
     const x0 = Math.min(...xs) - 2, x1 = Math.max(...xs) + 3, y0 = Math.min(...ys) - 2, y1 = Math.max(...ys) + 3;
-    const sc = Math.max(6, Math.min(22, Math.floor(760 / (x1 - x0)))), W = (x1 - x0) * sc, H = (y1 - y0) * sc;
+    const fit = Math.max(6, Math.min(22, Math.floor(760 / (x1 - x0)))), sc = zoom > 0 ? zoom : fit, W = (x1 - x0) * sc, H = (y1 - y0) * sc;
     const sx = (x: number) => (x - x0) * sc, sy = (y: number) => (y1 - y) * sc;          // world y points north
     let g = "";
     for (let x = Math.ceil(x0); x <= x1; x++) g += `<line x1="${sx(x)}" y1="0" x2="${sx(x)}" y2="${H}" stroke="var(--line)" stroke-width="${x % 10 === 0 ? 1 : 0.3}"/>`;
     for (let y = Math.ceil(y0); y <= y1; y++) g += `<line x1="0" y1="${sy(y)}" x2="${W}" y2="${sy(y)}" stroke="var(--line)" stroke-width="${y % 10 === 0 ? 1 : 0.3}"/>`;
+    const short = (p: string) => p.replace(/^MiniZip_IoPortShape_/, "Zip ").replace(/^LiftIoPortShape_/, "Lift ").replace(/_/g, " ");
     const ls = lines.map(({ pts, e }) => `<polyline points="${pts.map((p) => `${sx(p[0]) + sc / 2},${sy(p[1]) - sc / 2}`).join(" ")}" fill="none" stroke="${tcolor(e.proto)}" stroke-width="${Math.max(2, sc * 0.3)}" stroke-linejoin="round" opacity=".8"><title>${esc(e.proto)}</title></polyline>`).join("");
-    const rs = rects.map(({ x0: a, y0: b, x1: c, y1: d, e }) => `<g><rect x="${sx(a)}" y="${sy(d)}" width="${(c - a) * sc}" height="${(d - b) * sc}" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.2"/><text x="${sx(a) + 2}" y="${sy(d) + 10}" font-size="${Math.max(8, sc * 0.6)}" fill="var(--ink)" pointer-events="none">${esc(e.title ?? e.proto)}</text><title>${esc(e.proto)}${e.recipes?.length ? ": " + esc(e.recipes.join(", ")) : ""}</title></g>`).join("");
-    return `<div style="overflow:auto;max-height:70vh;border:1px solid var(--line)"><svg width="${W}" height="${H}" style="display:block">${g}${ls}${rs}</svg></div>
+    const rs = rects.map(({ x0: a, y0: b, x1: c, y1: d, e }) => {
+      const big = (c - a) * (d - b) >= 4, small = !big && !size.has(e.proto);
+      const tip = `<title>${esc(e.title ?? short(e.proto))}${e.recipes?.length ? ": " + esc(e.recipes.join(", ")) : ""}</title>`;
+      if (small) return `<rect x="${sx(a) + sc * 0.2}" y="${sy(d) + sc * 0.2}" width="${sc * 0.6}" height="${sc * 0.6}" rx="${sc * 0.3}" fill="${tcolor(e.proto)}" opacity=".9">${tip}</rect>`;
+      const lab = labels && sc * (c - a) > 28 ? `<text x="${sx(a) + 2}" y="${sy(d) + 10}" font-size="${Math.max(8, Math.min(12, sc * 0.6))}" fill="var(--ink)" pointer-events="none">${esc((e.title ?? short(e.proto)).slice(0, Math.max(4, Math.floor(((c - a) * sc) / 6))))}</text>` : "";
+      return `<g><rect x="${sx(a)}" y="${sy(d)}" width="${(c - a) * sc}" height="${(d - b) * sc}" fill="var(--panel)" stroke="var(--muted)" stroke-width="1.2"/>${lab}${tip}</g>`;
+    }).join("");
+    const controls = `<p class="row"><label>Zoom <input type="range" id="bpZoom" min="4" max="40" value="${Math.round(sc)}"></label> <label><input type="checkbox" id="bpLabels" ${labels ? "checked" : ""}> Labels</label> <button class="btn" id="bpFit">Fit</button> <span class="hint">Hover any part for its name and recipe. Dots are conveyor/pipe ports and lifts; lines are conveyors, pipes and channels.</span></p>`;
+    return `${controls}<div style="overflow:auto;max-height:70vh;border:1px solid var(--line)"><svg width="${W}" height="${H}" style="display:block">${g}${ls}${rs}</svg></div>
       <p class="hint">Drawn from the saved positions. Sizes come from the game data where known (storages and small parts show as one tile), so treat the shapes as approximate.</p>`;
   }
 
@@ -99,6 +107,9 @@ export function mountBlueprints(el: HTMLElement, getData: () => GameData) {
     wirePaste(); wireCopy();
   }
   function wireCopy() {
+    const z = el.querySelector<HTMLInputElement>("#bpZoom"); if (z) z.onchange = () => { zoom = Number(z.value); render(); };
+    const lb = el.querySelector<HTMLInputElement>("#bpLabels"); if (lb) lb.onchange = () => { labels = lb.checked; render(); };
+    const ft = el.querySelector<HTMLButtonElement>("#bpFit"); if (ft) ft.onclick = () => { zoom = 0; render(); };
     const cp = el.querySelector<HTMLButtonElement>("#bpCopy");
     if (cp) cp.onclick = async () => { const s = (sel === -2 ? pasted : list?.[sel])?.string; if (!s) { msg = `<div class="box bad">The exporter did not write a string for this blueprint.</div>`; return render(); } try { await navigator.clipboard.writeText(s); cp.textContent = "Copied"; } catch { msg = `<div class="box"><textarea readonly style="width:100%;height:6rem">${esc(s)}</textarea></div>`; render(); } };
   }
